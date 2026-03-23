@@ -1,0 +1,42 @@
+# 🔹 Virtual Environment
+venv/
+env/
+
+# 🔹 Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 🔹 Environment variables (IMPORTANT)
+.env
+
+# 🔹 Logs
+*.log
+
+# 🔹 VS Code settings
+.vscode/
+
+# 🔹 OS files
+.DS_Store
+Thumbs.db
+
+# 🔹 Runtime / temp files
+*.sqlite3
+*.db
+
+# 🔹 Flask stuff
+instance/
+.webassets-cache
+
+# 🔹 Build / dist
+build/
+dist/
+*.egg-info/
+
+# 🔹 Jupyter (if used)
+.ipynb_checkpoints/
+
+# 🔹 Coverage / testing
+.coverage
+htmlcov/
