@@ -40,3 +40,6 @@ dist/
 # 🔹 Coverage / testing
 .coverage
 htmlcov/
+
+# 🔹 Chroma database (generated runtime data)
+chroma_db/

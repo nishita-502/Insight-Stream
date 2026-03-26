@@ -1,53 +1,113 @@
 import os
-from flask import Flask, jsonify, render_template,request
+from flask import Flask, jsonify, render_template, request
 from pymongo import MongoClient
 from dotenv import load_dotenv
+
+# Your custom logic
 from engine.scraper import fetch_technical_news
 from engine.models import calculate_impact_score
-from langchain_ollama import ChatOllama
-from langchain_classic.chains import RetrievalQA
-from langchain_ollama import ChatOllama
 
+# Modern LangChain Imports
+from langchain_ollama import ChatOllama
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import Chroma
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
-
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.documents import Document
 
-
-# Load variables from .env file
 load_dotenv()
 
 app = Flask(__name__)
 
-# Connect to MongoDB Atlas
-# Make sure MONGO_URI is in your .env file!
+# --- DB SETUP ---
 client = MongoClient(os.getenv("MONGO_URI"))
 db = client.insight_stream
 collection = db.news_articles
 
+# --- EMBEDDINGS SETUP ---
+embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+CHROMA_PATH = os.path.join(os.getcwd(), "chroma_db")
+
+
+def ingest_articles_to_chroma():
+    """
+    Reads all articles from MongoDB and embeds them into ChromaDB.
+    Uses the article link as a unique ID to prevent duplicates.
+    Call this after scraping, or at startup.
+    """
+    articles = list(collection.find({}))
+    if not articles:
+        print("[Ingest] No articles found in MongoDB to ingest.")
+        return
+
+    vector_db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embeddings)
+    existing = vector_db.get()
+    existing_ids = set(existing["ids"]) if existing["ids"] else set()
+
+    docs_to_add = []
+    ids_to_add = []
+
+    for article in articles:
+        doc_id = article.get("link", str(article["_id"]))
+
+        if doc_id in existing_ids:
+            continue
+
+        content = (
+            f"Title: {article.get('title', 'N/A')}\n"
+            f"Source: {article.get('source', 'N/A')}\n"
+            f"Published: {article.get('published', 'N/A')}\n"
+            f"Summary: {article.get('summary', 'N/A')}\n"
+            f"Impact Score: {article.get('impact_score', 'N/A')}\n"
+            f"Link: {doc_id}"
+        )
+
+        docs_to_add.append(Document(page_content=content, metadata={"source": doc_id}))
+        ids_to_add.append(doc_id)
+
+    if docs_to_add:
+        vector_db.add_documents(documents=docs_to_add, ids=ids_to_add)
+        print(f"[Ingest] Embedded {len(docs_to_add)} new articles into ChromaDB.")
+    else:
+        print("[Ingest] ChromaDB already up to date.")
+
+
+# Embed existing MongoDB articles into ChromaDB on startup
+ingest_articles_to_chroma()
+
+
+# --- ROUTES ---
+
 @app.route('/')
 def home():
-    # return "InsightStream Backend is Running!"
     return render_template('index.html')
+
 
 @app.route('/sync-news')
 def sync_news():
-    """Trigger the scraper and save unique news to MongoDB"""
+    """
+    Scrape fresh articles, save unique ones to MongoDB,
+    then embed them into ChromaDB for RAG.
+    Kept as GET so your existing frontend button still works.
+    """
     raw_data = fetch_technical_news()
     new_entries = 0
-    
+
     for item in raw_data:
-        # Avoid duplicates by checking the link
+        item['impact_score'] = calculate_impact_score(item['title'], item['published'])
         if not collection.find_one({"link": item["link"]}):
             collection.insert_one(item)
             new_entries += 1
-            
+
+    # Embed newly scraped articles into ChromaDB
+    ingest_articles_to_chroma()
+
     return jsonify({
         "status": "success",
         "total_scraped": len(raw_data),
         "new_added": new_entries
     })
-    
 
 
 @app.route('/api/news')
@@ -56,90 +116,82 @@ def get_news():
     Fetch all news from MongoDB, rank them by Impact Score,
     and return them as a sorted JSON list.
     """
-    # 1. Fetch from MongoDB (Exclude the '_id' field because JSON can't read it easily)
     articles = list(collection.find({}, {"_id": 0}))
-    
-    # 2. Enrich with Impact Scores
+
     for article in articles:
-        # We pass the title and date to our model's logic
         article['impact_score'] = calculate_impact_score(
-            article['title'], 
+            article['title'],
             article['published']
         )
-    
-    # 3. Sort by Score (Highest first)
-    # This uses a lambda function: "Sort this list based on the 'impact_score' key"
+
     sorted_news = sorted(articles, key=lambda x: x['impact_score'], reverse=True)
-    
     return jsonify(sorted_news)
 
-# @app.route('/api/ask', methods=['POST'])
-# def ask_ai():
-#     from flask import request
-#     data = request.json
-#     user_query = data.get("query")
 
-#     # 1. Setup the Local LLM (Ollama)
-#     # Ensure you have run 'ollama run llama3' in your terminal once before this
-#     llm = ChatOllama(model="mistral:latest", temperature=0)
+@app.route('/api/refresh', methods=['POST'])
+def refresh_news():
+    """
+    POST version of sync-news — does the exact same thing.
+    Kept for API clients or future frontend use.
+    """
+    raw_data = fetch_technical_news()
+    new_count = 0
 
-#     # 2. Use our existing ChromaDB as the 'Retriever'
-#     # This searches the news we scraped for the top 3 relevant pieces
-#     retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+    for item in raw_data:
+        item['impact_score'] = calculate_impact_score(item['title'], item['published'])
+        if not collection.find_one({"link": item["link"]}):
+            collection.insert_one(item)
+            new_count += 1
 
-#     # 3. Create the RAG Chain
-#     # The 'stuff' chain puts the news snippets directly into the prompt
-#     qa_chain = RetrievalQA.from_chain_type(
-#         llm=llm,
-#         chain_type="stuff",
-#         retriever=retriever
-#     )
+    ingest_articles_to_chroma()
 
-#     # 4. Ask the question based on the news
-#     # We add a small instruction to the query to ensure it uses the news
-#     prompt = f"Based on the following tech news, answer this: {user_query}"
-#     response = qa_chain.invoke(prompt)
-    
-#     return jsonify({"answer": response["result"]})
+    return jsonify({"status": "success", "new_articles": new_count})
 
-# @app.route('/api/ask', methods=['POST'])
-# def ask_ai():
-#     data = request.json
-#     user_query = data.get("query")
 
-#     # 1. Initialize our Local Mistral Model
-#     llm = ChatOllama(model="mistral:latest", temperature=0)
+@app.route('/api/ask', methods=['POST'])
+def ask_ai():
+    data = request.json
+    user_query = data.get("query")
 
-#     # 2. Define the 'System Prompt'
-#     # This is the "brain" instruction that tells the AI how to use the news.
-#     system_prompt = (
-#         "You are an expert technical news analyst. "
-#         "Use the following pieces of retrieved technical news context to answer the user's question. "
-#         "If the answer isn't in the context, say that you don't know based on the current feed. "
-#         "Keep your answer concise and professional."
-#         "\n\n"
-#         "{context}"
-#     )
+    if not user_query:
+        return jsonify({"answer": "Please ask a question!"})
 
-#     prompt = ChatPromptTemplate.from_messages([
-#         ("system", system_prompt),
-#         ("human", "{input}"),
-#     ])
+    # Re-initialize on every request so it always reflects latest ChromaDB state
+    vector_db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embeddings)
 
-#     # 3. Create the 'Stuff' Chain
-#     # This part handles how the documents are formatted into the prompt.
-#     question_answer_chain = create_stuff_documents_chain(llm, prompt)
+    doc_count = vector_db._collection.count()
+    if doc_count == 0:
+        return jsonify({
+            "answer": (
+                "The knowledge base is empty. "
+                "Please hit /sync-news first to scrape and embed articles."
+            )
+        })
 
-#     # 4. Create the final Retrieval Chain
-#     # We use our existing 'vector_db' from ChromaDB as the retriever.
-#     retriever = vector_db.as_retriever(search_kwargs={"k": 3})
-#     rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+    llm = ChatOllama(model="mistral:latest", temperature=0)
 
-#     # 5. Invoke the chain
-#     # Note the change: we use 'input' instead of 'query' to match the prompt template
-#     response = rag_chain.invoke({"input": user_query})
-    
-#     return jsonify({"answer": response["answer"]})
+    system_prompt = (
+        "You are a technical news analyst for software engineers. "
+        "Use ONLY the provided news context to answer the user's question. "
+        "Always mention the source and published date when referencing an article. "
+        "If the context does not contain relevant information, say: "
+        "'I don't have updates on that specific topic in the current news feed.' "
+        "Do NOT make up information.\n\n"
+        "CONTEXT:\n{context}"
+    )
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{input}"),
+    ])
+
+    question_answer_chain = create_stuff_documents_chain(llm, prompt)
+    retriever = vector_db.as_retriever(search_kwargs={"k": 6})
+    rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+
+    response = rag_chain.invoke({"input": user_query})
+    return jsonify({"answer": response["answer"]})
+
 
 if __name__ == "__main__":
     app.run(debug=True)
