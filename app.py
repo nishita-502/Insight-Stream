@@ -15,6 +15,7 @@ from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
+from datetime import datetime, timedelta
 
 load_dotenv()
 
@@ -32,28 +33,43 @@ CHROMA_PATH = os.path.join(os.getcwd(), "chroma_db")
 
 def ingest_articles_to_chroma():
     """
-    Reads all articles from MongoDB and embeds them into ChromaDB.
+    1. Deletes embeddings older than 7 days from ChromaDB.
+    2. Reads all articles from MongoDB and embeds any new ones.
     Uses the article link as a unique ID to prevent duplicates.
-    Call this after scraping, or at startup.
     """
+    cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+    vector_db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embeddings)
+ 
+    # --- STEP 1: PURGE old docs from ChromaDB ---
+    existing = vector_db.get(include=["metadatas"])
+    ids_to_delete = [
+        doc_id
+        for doc_id, meta in zip(existing["ids"], existing["metadatas"])
+        if meta.get("published", "9999") < cutoff  # "9999" = keep if no date found
+    ]
+    if ids_to_delete:
+        vector_db.delete(ids=ids_to_delete)
+        print(f"[Ingest] Deleted {len(ids_to_delete)} old embeddings from ChromaDB.")
+ 
+    # --- STEP 2: EMBED new articles from MongoDB ---
     articles = list(collection.find({}))
     if not articles:
         print("[Ingest] No articles found in MongoDB to ingest.")
         return
-
-    vector_db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embeddings)
-    existing = vector_db.get()
-    existing_ids = set(existing["ids"]) if existing["ids"] else set()
-
+ 
+    # Refresh existing IDs after deletion
+    existing_after = vector_db.get()
+    existing_ids = set(existing_after["ids"]) if existing_after["ids"] else set()
+ 
     docs_to_add = []
     ids_to_add = []
-
+ 
     for article in articles:
         doc_id = article.get("link", str(article["_id"]))
-
+ 
         if doc_id in existing_ids:
-            continue
-
+            continue  # Already embedded, skip
+ 
         content = (
             f"Title: {article.get('title', 'N/A')}\n"
             f"Source: {article.get('source', 'N/A')}\n"
@@ -62,20 +78,21 @@ def ingest_articles_to_chroma():
             f"Impact Score: {article.get('impact_score', 'N/A')}\n"
             f"Link: {doc_id}"
         )
-
-        docs_to_add.append(Document(page_content=content, metadata={"source": doc_id}))
+ 
+        docs_to_add.append(Document(
+            page_content=content,
+            metadata={
+                "source": doc_id,
+                "published": article.get("published", "")  # Stored for future cleanup
+            }
+        ))
         ids_to_add.append(doc_id)
-
+ 
     if docs_to_add:
         vector_db.add_documents(documents=docs_to_add, ids=ids_to_add)
         print(f"[Ingest] Embedded {len(docs_to_add)} new articles into ChromaDB.")
     else:
         print("[Ingest] ChromaDB already up to date.")
-
-
-# Embed existing MongoDB articles into ChromaDB on startup
-ingest_articles_to_chroma()
-
 
 # --- ROUTES ---
 
@@ -83,30 +100,36 @@ ingest_articles_to_chroma()
 def home():
     return render_template('index.html')
 
-
 @app.route('/sync-news')
 def sync_news():
     """
-    Scrape fresh articles, save unique ones to MongoDB,
-    then embed them into ChromaDB for RAG.
-    Kept as GET so your existing frontend button still works.
+    1. Deletes MongoDB articles older than 7 days.
+    2. Scrapes fresh articles and saves unique ones to MongoDB.
+    3. Embeds new articles into ChromaDB (and purges old embeddings).
     """
+    # --- STEP 1: PURGE old articles from MongoDB ---
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    delete_result = collection.delete_many({"published": {"$lt": cutoff.isoformat()}})
+    print(f"[Sync] Deleted {delete_result.deleted_count} old articles from MongoDB.")
+ 
+    # --- STEP 2: SCRAPE fresh articles ---
     raw_data = fetch_technical_news()
     new_entries = 0
-
+ 
     for item in raw_data:
         item['impact_score'] = calculate_impact_score(item['title'], item['published'])
         if not collection.find_one({"link": item["link"]}):
             collection.insert_one(item)
             new_entries += 1
-
-    # Embed newly scraped articles into ChromaDB
+ 
+    # --- STEP 3: SYNC ChromaDB ---
     ingest_articles_to_chroma()
-
+ 
     return jsonify({
         "status": "success",
         "total_scraped": len(raw_data),
-        "new_added": new_entries
+        "new_added": new_entries,
+        "old_deleted": delete_result.deleted_count
     })
 
 
