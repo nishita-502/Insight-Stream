@@ -190,10 +190,12 @@ return results[0][1] < 0.38  # Increase for stricter matching
 
 ## 📸 Screenshots
 
-![Screenshot](Screenshot%202026-04-15%20171254.png)
-![Screenshot](Screenshot%202026-04-15%20171312.png)
-![Screenshot](Screenshot%202026-04-15%20171340.png)
-![Screenshot](Screenshot%202026-04-15%20171358.png)
+## 📸 Screenshots
+
+![Landing](images/landing.png)
+![Feed](images/feed.png)
+![AI Page](images/ai.png)
+![AI Output](images/ai_output.png)
 
 ## Dependencies
 
