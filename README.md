@@ -188,6 +188,13 @@ Adjust duplicate detection in `engine/processor.py`:
 return results[0][1] < 0.38  # Increase for stricter matching
 ```
 
+## 📸 Screenshots
+
+![Screenshot](Screenshot%202026-04-15%20171254.png)
+![Screenshot](Screenshot%202026-04-15%20171312.png)
+![Screenshot](Screenshot%202026-04-15%20171340.png)
+![Screenshot](Screenshot%202026-04-15%20171358.png)
+
 ## Dependencies
 
 See `requirements.txt` for full list. Key packages:
